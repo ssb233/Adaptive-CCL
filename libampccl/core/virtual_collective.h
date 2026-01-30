@@ -10,6 +10,7 @@
 #include "telemetry/timer.h"
 #include "telemetry/stats.h"
 #include "common/config.h"
+#include "common/log.h"
 #include <cstddef>
 #include <cstring>
 
@@ -47,6 +48,9 @@ public:
         // 5. Launch fast + PCIe backend
         ExecStat stat;
         Timer timer;
+
+        AMPCCL_LOG(INFO, "AllReduce before CCL: op=AllReduce bytes=%zu datatype=%d alpha=%.3f use_pcie=%d fast_bytes=%zu pcie_bytes=%zu",
+                   op_key.bytes, datatype, alpha, plan.use_pcie ? 1 : 0, plan.fast_bytes, plan.pcie_bytes);
 
         if (plan.use_pcie && plan.pcie_bytes > 0) {
             // Split buffer and launch both backends
@@ -107,6 +111,11 @@ public:
         // 9. Cache.update()
         domain->controller->Update(op_key, stat, domain->param_cache);
 
+        AMPCCL_LOG(INFO, "AllReduce after CCL: fast_time=%.6fs pcie_time=%.6fs fast_bytes=%zu pcie_bytes=%zu fast_ok=%d pcie_ok=%d (plan: alpha=%.3f fast_bytes=%zu pcie_bytes=%zu)",
+                   stat.fast_time, stat.pcie_time, stat.fast_bytes, stat.pcie_bytes,
+                   stat.fast_success ? 1 : 0, stat.pcie_success ? 1 : 0,
+                   alpha, plan.fast_bytes, plan.pcie_bytes);
+
         return stat.fast_success && stat.pcie_success ?
                BackendResult::Success : BackendResult::UnhandledError;
     }
@@ -131,6 +140,9 @@ public:
         double alpha = domain->controller->SuggestAlpha(op_key, domain->param_cache);
         Plan plan = Planner::CreatePlan(op_key.bytes, alpha, param.use_pcie);
 
+        AMPCCL_LOG(INFO, "AllGather before CCL: bytes=%zu datatype=%d alpha=%.3f use_pcie=%d fast_bytes=%zu pcie_bytes=%zu",
+                   op_key.bytes, datatype, alpha, plan.use_pcie ? 1 : 0, plan.fast_bytes, plan.pcie_bytes);
+
         ExecStat stat;
         Timer timer;
 
@@ -148,6 +160,11 @@ public:
         }
 
         domain->controller->Update(op_key, stat, domain->param_cache);
+
+        AMPCCL_LOG(INFO, "AllGather after CCL: fast_time=%.6fs pcie_time=%.6fs fast_bytes=%zu fast_ok=%d (plan: alpha=%.3f fast_bytes=%zu pcie_bytes=%zu)",
+                   stat.fast_time, stat.pcie_time, stat.fast_bytes, stat.fast_success ? 1 : 0,
+                   alpha, plan.fast_bytes, plan.pcie_bytes);
+
         return stat.fast_success ? BackendResult::Success : BackendResult::UnhandledError;
     }
 

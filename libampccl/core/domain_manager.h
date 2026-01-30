@@ -3,6 +3,7 @@
 
 #include "domain.h"
 #include "controller/algo_factory.h"
+#include "common/log.h"
 #include <unordered_map>
 #include <mutex>
 #include <memory>
@@ -73,8 +74,12 @@ private:
     CommDomain* GetOrCreateDomainByKeyLocked(const CommDomainKey& key) {
         auto it = key_to_domain_.find(key);
         if (it != key_to_domain_.end()) {
+            AMPCCL_LOG(INFO, "Comm reused (existing): world_size=%d topology_hash=%llu",
+                       key.world_size, static_cast<unsigned long long>(key.topology_hash));
             return it->second.get();
         }
+        AMPCCL_LOG(INFO, "Comm created (new): world_size=%d topology_hash=%llu",
+                   key.world_size, static_cast<unsigned long long>(key.topology_hash));
         CommDomain temp_domain(key, nullptr);
         auto algo = AlgoFactory::Create(temp_domain);
         auto controller = std::make_unique<AdaptiveController>(std::move(algo));

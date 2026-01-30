@@ -1,0 +1,103 @@
+# Adaptive-CCL 编译说明
+
+## 编译产物
+
+- **默认**：生成 **`libampccl.so`**（同时包含 NCCL 与 HCCL 的 hook，供 LD_PRELOAD 使用）。
+- **可选**：仅生成 NCCL 或仅生成 HCCL 的 .so，便于与 NCCL/HCCL 源码一起或单独部署。
+
+编译时 **不链接** libnccl.so / libhccl.so，运行时通过 `dlopen`/`dlsym` 调用原始 API，因此：
+- 同一份 `libampccl.so` 可用于只链接 NCCL 或只链接 HCCL 的应用；
+- 若需参与 NCCL 或 HCCL 的源码编译，可将本仓库作为子模块，只编译对应 hook 的 .so（见下文“解耦编译”）。
+
+---
+
+## 方式一：使用编译脚本（推荐）
+
+```bash
+cd Adaptive-CCL
+chmod +x scripts/build.sh
+./scripts/build.sh
+```
+
+产物在 `build/libampccl.so`。
+
+指定构建类型（Debug/Release）：
+
+```bash
+./scripts/build.sh -DCMAKE_BUILD_TYPE=Release
+```
+
+---
+
+## 方式二：使用 CMake 直接编译
+
+```bash
+cd Adaptive-CCL
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build .
+```
+
+产物：`build/libampccl.so`（当 `BUILD_SHARED_LIBS=ON` 时，默认即生成 .so）。
+
+---
+
+## 解耦编译：仅 NCCL 或仅 HCCL
+
+若希望生成**只含 NCCL hook** 或**只含 HCCL hook** 的 .so（体积更小或与 NCCL/HCCL 源码一起编译时使用）：
+
+**仅 NCCL：**
+```bash
+./scripts/build.sh -DNCCL_ONLY=ON
+# 产物: build/libampccl_nccl.so
+```
+
+**仅 HCCL：**
+```bash
+./scripts/build.sh -DHCCL_ONLY=ON
+# 产物: build/libampccl_hccl.so
+```
+
+使用方式：
+
+- NCCL 应用：`LD_PRELOAD=/path/to/libampccl.so ./app` 或 `LD_PRELOAD=/path/to/libampccl_nccl.so ./app`
+- HCCL 应用：`LD_PRELOAD=/path/to/libampccl.so ./app` 或 `LD_PRELOAD=/path/to/libampccl_hccl.so ./app`
+
+---
+
+## 环境变量（运行时）
+
+| 变量 | 说明 |
+|------|------|
+| `AMPCCL_LOG_LEVEL` | 日志级别：`0`/`off`、`1`/`error`、`2`/`warn`、`3`/`info`、`4`/`debug`。测试融合 NCCL/HCCL 时建议设为 `info` 或 `debug`。 |
+| `AMPCCL_ALGO` | 算法：`tcp`、`dcqcn`、`static`。 |
+| `AMPCCL_MIN_MSG_SIZE` | 启用 PCIe 的最小消息大小（字节）。 |
+| `AMPCCL_ENABLE_PCIE` | `1`/`0` 是否启用 PCIe 路径。 |
+
+示例（打开 INFO 日志）：
+
+```bash
+export AMPCCL_LOG_LEVEL=info
+# 或
+export AMPCCL_LOG_LEVEL=3
+
+LD_PRELOAD=/path/to/build/libampccl.so ./your_nccl_or_hccl_app
+```
+
+日志会打印到 **stderr**，包括：
+- 两个 CCL 任务执行**前**：op、bytes、alpha、use_pcie、fast_bytes、pcie_bytes；
+- 两个 CCL 任务执行**后**：fast_time、pcie_time、fast_bytes、pcie_bytes、成功与否，以及划分参数；
+- 从 rawComm **创建新 Comm** 或 **查到已有 Comm** 时：world_size、topology_hash。
+
+---
+
+## 与 NCCL/HCCL 源码一起编译
+
+本仓库设计为**独立编译成 .so 再通过 LD_PRELOAD 注入**，不要求与 NCCL/HCCL 同树编译。
+
+若你希望把 Adaptive-CCL 编进 NCCL 或 HCCL 的构建系统：
+1. 将 `libampccl` 头文件与源加入该工程；
+2. 仅编译并链接 NCCL 或 HCCL 的 hook 源（`nccl_hook.cc` 或 `hccl_hook.cc`），并链接其余 ampccl 核心实现；
+3. 输出仍为 .so，由该工程的 Makefile/CMake 生成即可。
+
+当前 CMake 的 `NCCL_ONLY` / `HCCL_ONLY` 即用于生成只含对应 hook 的 `libampccl_nccl.so` / `libampccl_hccl.so`，便于集成到其它构建中。

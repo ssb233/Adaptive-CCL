@@ -58,7 +58,7 @@ export AMPCCL_ALGO=static   # 使用静态固定比例算法
 - `AMPCCL_MIN_CHUNK_SIZE`: 最小分块大小（默认 4096 字节）
 - `AMPCCL_MIN_MSG_SIZE`: 启用 PCIe 的最小消息大小（默认 8192 字节）
 - `AMPCCL_ENABLE_PCIE`: 启用/禁用 PCIe 后端（默认 1）
-- `AMPCCL_DEBUG`: 启用调试日志（默认 0）
+- `AMPCCL_LOG_LEVEL`: 日志级别 `0`/`off`、`1`/`error`、`2`/`warn`、`3`/`info`、`4`/`debug`；测试融合 NCCL/HCCL 时建议设为 `info` 或 `3`
 
 ### 2. PCIe 后端集成
 
@@ -105,18 +105,29 @@ template<> class BackendBase<PCIeBackend> { ... };
 auto algo = AlgoFactory::Create(domain);  // 读取 AMPCCL_ALGO
 ```
 
+### 6. 日志
+
+通过**全局日志级别**控制输出（环境变量 `AMPCCL_LOG_LEVEL` 或代码内 `ampccl::SetLogLevel()`），级别：`OFF`/`ERROR`/`WARN`/`INFO`/`DEBUG`。日志输出到 stderr，包括：
+- 两个 CCL 任务执行**前**：op、bytes、alpha、use_pcie、fast_bytes、pcie_bytes；
+- 两个 CCL 任务执行**后**：fast_time、pcie_time、划分参数等；
+- 从 rawComm **创建新 Comm** 或 **查到已有 Comm** 时：world_size、topology_hash。
+
+详见 [BUILD.md](BUILD.md)。
+
 ## 构建
 
+见 **[BUILD.md](BUILD.md)**。简要：
+
 ```bash
-mkdir build && cd build
-cmake ..
-make
+./scripts/build.sh
+# 产物: build/libampccl.so
 ```
 
-生成的库文件可用于 LD_PRELOAD：
+生成的 .so 可用于 LD_PRELOAD：
 
 ```bash
-export LD_PRELOAD=./libampccl.so
+export AMPCCL_LOG_LEVEL=info
+export LD_PRELOAD=/path/to/build/libampccl.so
 ./your_application
 ```
 
