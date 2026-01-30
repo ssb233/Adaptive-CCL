@@ -39,6 +39,7 @@ set(AMPCCL_HEADERS
     libampccl/controller/controller.h
     libampccl/core/domain.h
     libampccl/core/domain_manager.h
+    libampccl/core/comm_init.h
     libampccl/core/planner.h
     libampccl/core/virtual_collective.h
 )

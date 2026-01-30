@@ -9,7 +9,15 @@
 
 namespace ampccl {
 
-// Maps NCCL/HCCL communicator handles to CommDomain
+// Manages the global "dividing param" table keyed by *our* Comm (CommDomainKey),
+// and the mapping from raw backend communicator to our Comm.
+//
+// - Table: our Comm (topology + ranks + size) -> CommDomain (controller + param cache).
+//   Shared across ranks; reused when a communicator is destroyed and re-created
+//   with the same topology/ranks/size.
+// - Raw mapping: raw comm pointer -> our Comm key. Used only to find which
+//   domain to use for a given collective call. Unregistering a raw comm does
+//   not remove the domain.
 class DomainManager {
 public:
     static DomainManager& GetInstance() {
@@ -17,47 +25,43 @@ public:
         return instance;
     }
 
-    // Get or create domain for a communicator
-    CommDomain* GetOrCreateDomain(void* comm, const CommDomainKey& key) {
+    // Get or create domain by *our* Comm key (used by CommInit after building key).
+    CommDomain* GetOrCreateDomainByKey(const CommDomainKey& key) {
         std::lock_guard<std::mutex> lock(mutex_);
-
-        auto it = comm_to_domain_.find(comm);
-        if (it != comm_to_domain_.end()) {
-            return it->second.get();
-        }
-
-        // Create new domain
-        // Create a temporary domain for factory (needs proper initialization)
-        CommDomain temp_domain(key, nullptr);
-        auto algo = AlgoFactory::Create(temp_domain);
-        auto controller = std::make_unique<AdaptiveController>(std::move(algo));
-        auto domain = std::make_unique<CommDomain>(key, std::move(controller));
-
-        CommDomain* domain_ptr = domain.get();
-        comm_to_domain_[comm] = std::move(domain);
-
-        return domain_ptr;
+        return GetOrCreateDomainByKeyLocked(key);
     }
 
-    // Get domain for a communicator (returns nullptr if not found)
-    CommDomain* GetDomain(void* comm) {
+    // Register raw communicator to our Comm. Call after backend CommInit.
+    void RegisterRawComm(void* raw_comm, const CommDomainKey& key) {
         std::lock_guard<std::mutex> lock(mutex_);
-        auto it = comm_to_domain_.find(comm);
-        if (it != comm_to_domain_.end()) {
-            return it->second.get();
-        }
-        return nullptr;
+        (void)GetOrCreateDomainByKeyLocked(key);
+        raw_to_key_[raw_comm] = key;
     }
 
-    // Remove domain (when communicator is destroyed)
-    void RemoveDomain(void* comm) {
+    // Get domain for a raw communicator (for collective hooks).
+    CommDomain* GetDomainByRawComm(void* raw_comm) {
         std::lock_guard<std::mutex> lock(mutex_);
-        comm_to_domain_.erase(comm);
+        auto it = raw_to_key_.find(raw_comm);
+        if (it == raw_to_key_.end()) {
+            return nullptr;
+        }
+        auto jt = key_to_domain_.find(it->second);
+        if (jt == key_to_domain_.end()) {
+            return nullptr;
+        }
+        return jt->second.get();
+    }
+
+    // Unregister raw communicator on CommDestroy. Does not remove the domain.
+    void UnregisterRawComm(void* raw_comm) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        raw_to_key_.erase(raw_comm);
     }
 
     void Clear() {
         std::lock_guard<std::mutex> lock(mutex_);
-        comm_to_domain_.clear();
+        raw_to_key_.clear();
+        key_to_domain_.clear();
     }
 
 private:
@@ -66,8 +70,23 @@ private:
     DomainManager(const DomainManager&) = delete;
     DomainManager& operator=(const DomainManager&) = delete;
 
+    CommDomain* GetOrCreateDomainByKeyLocked(const CommDomainKey& key) {
+        auto it = key_to_domain_.find(key);
+        if (it != key_to_domain_.end()) {
+            return it->second.get();
+        }
+        CommDomain temp_domain(key, nullptr);
+        auto algo = AlgoFactory::Create(temp_domain);
+        auto controller = std::make_unique<AdaptiveController>(std::move(algo));
+        auto domain = std::make_unique<CommDomain>(key, std::move(controller));
+        CommDomain* ptr = domain.get();
+        key_to_domain_[key] = std::move(domain);
+        return ptr;
+    }
+
     mutable std::mutex mutex_;
-    std::unordered_map<void*, std::unique_ptr<CommDomain>> comm_to_domain_;
+    std::unordered_map<CommDomainKey, std::unique_ptr<CommDomain>> key_to_domain_;
+    std::unordered_map<void*, CommDomainKey> raw_to_key_;
 };
 
 }  // namespace ampccl

@@ -3,12 +3,14 @@
 
 #include "core/virtual_collective.h"
 #include "core/domain_manager.h"
+#include "core/comm_init.h"
 #include "common/op_key.h"
 #include <dlfcn.h>
 #include <cstring>
 
 // HCCL types (forward declarations if headers not available)
 #ifndef HCCL_H
+#define HCCL_UNIQUE_ID_BYTES 128
 typedef enum {
     HCCL_SUCCESS = 0,
     HCCL_INVALID_PARAM = 1,
@@ -18,10 +20,16 @@ typedef enum { HCCL_DATA_TYPE_FLOAT = 0, HCCL_DATA_TYPE_FLOAT16, HCCL_DATA_TYPE_
 typedef enum { HCCL_REDUCE_SUM = 0, HCCL_REDUCE_MAX, HCCL_REDUCE_MIN } HcclReduceOp;
 typedef void* HcclComm;
 typedef void* aclrtStream;
+typedef struct { char internal[HCCL_UNIQUE_ID_BYTES]; } hcclUniqueId;
+#else
+#define HCCL_UNIQUE_ID_BYTES sizeof(hcclUniqueId)
 #endif
 
 // Forward declarations for original HCCL functions
-// Note: HCCL uses hcclResult_t return type
+typedef hcclResult_t (*hcclGetUniqueId_t)(hcclUniqueId* uniqueId);
+typedef hcclResult_t (*hcclCommInitRank_t)(HcclComm* comm, unsigned int nranks, hcclUniqueId commId, unsigned int rank);
+typedef hcclResult_t (*hcclCommDestroy_t)(HcclComm comm);
+
 typedef hcclResult_t (*hcclAllReduce_t)(
     const void* sendbuff, void* recvbuff, unsigned long count,
     HcclDataType datatype, HcclReduceOp op, HcclComm comm, aclrtStream stream);
@@ -39,6 +47,9 @@ typedef hcclResult_t (*hcclBroadcast_t)(
     HcclDataType datatype, unsigned int root, HcclComm comm, aclrtStream stream);
 
 // Function pointers to original HCCL functions
+static hcclGetUniqueId_t orig_hcclGetUniqueId = nullptr;
+static hcclCommInitRank_t orig_hcclCommInitRank = nullptr;
+static hcclCommDestroy_t orig_hcclCommDestroy = nullptr;
 static hcclAllReduce_t orig_hcclAllReduce = nullptr;
 static hcclAllGather_t orig_hcclAllGather = nullptr;
 static hcclReduceScatter_t orig_hcclReduceScatter = nullptr;
@@ -55,6 +66,9 @@ static void LoadOriginalFunctions() {
     }
 
     if (handle) {
+        orig_hcclGetUniqueId = (hcclGetUniqueId_t)dlsym(handle, "HcclGetUniqueId");
+        orig_hcclCommInitRank = (hcclCommInitRank_t)dlsym(handle, "HcclCommInitRank");
+        orig_hcclCommDestroy = (hcclCommDestroy_t)dlsym(handle, "HcclCommDestroy");
         orig_hcclAllReduce = (hcclAllReduce_t)dlsym(handle, "HcclAllReduce");
         orig_hcclAllGather = (hcclAllGather_t)dlsym(handle, "HcclAllGather");
         orig_hcclReduceScatter = (hcclReduceScatter_t)dlsym(handle, "HcclReduceScatter");
@@ -72,19 +86,49 @@ static ampccl::BackendResult ConvertHCCLResult(hcclResult_t hccl_result) {
     return ampccl::BackendResult::UnhandledError;
 }
 
-// Helper to get or create domain for HCCL communicator
-static ampccl::CommDomain* GetDomainForComm(HcclComm comm) {
-    // Create domain key from communicator
-    ampccl::CommDomainKey key;
-    key.world_size = 0;  // Should be extracted from comm
-    key.topology_hash = 0;  // Should be computed from topology
-    key.ranks.clear();  // Should be extracted from comm
-
-    return ampccl::DomainManager::GetInstance().GetOrCreateDomain(comm, key);
+// Look up domain by raw HCCL communicator (registered at CommInit).
+static ampccl::CommDomain* GetDomainByRawComm(HcclComm comm) {
+    return ampccl::DomainManager::GetInstance().GetDomainByRawComm(comm);
 }
 
 // Hooked HCCL functions
 extern "C" {
+
+hcclResult_t HcclGetUniqueId(hcclUniqueId* uniqueId) {
+    LoadOriginalFunctions();
+    if (orig_hcclGetUniqueId) {
+        return orig_hcclGetUniqueId(uniqueId);
+    }
+    return HCCL_INVALID_PARAM;
+}
+
+hcclResult_t HcclCommInitRank(HcclComm* comm, unsigned int nranks, hcclUniqueId commId, unsigned int rank) {
+    LoadOriginalFunctions();
+    if (!orig_hcclCommInitRank) {
+        return HCCL_INVALID_PARAM;
+    }
+    hcclResult_t ret = orig_hcclCommInitRank(comm, nranks, commId, rank);
+    if (ret != HCCL_SUCCESS || comm == nullptr || *comm == nullptr) {
+        return ret;
+    }
+    ampccl::CommDomainKey key = ampccl::BuildKeyFromHcclInit(
+        static_cast<int>(nranks), &commId, HCCL_UNIQUE_ID_BYTES, static_cast<int>(rank));
+    ampccl::DomainManager::GetInstance().RegisterRawComm(*comm, key);
+    ampccl::CommDomain* domain = ampccl::DomainManager::GetInstance().GetDomainByRawComm(*comm);
+    if (domain) {
+        ampccl::InitPCIeForDomain(domain);  // reserved
+    }
+    return ret;
+}
+
+hcclResult_t HcclCommDestroy(HcclComm comm) {
+    LoadOriginalFunctions();
+    ampccl::DomainManager::GetInstance().UnregisterRawComm(comm);
+    if (orig_hcclCommDestroy) {
+        return orig_hcclCommDestroy(comm);
+    }
+    return HCCL_INVALID_PARAM;
+}
 
 hcclResult_t HcclAllReduce(
     const void* sendbuff, void* recvbuff, unsigned long count,
@@ -92,17 +136,14 @@ hcclResult_t HcclAllReduce(
 
     LoadOriginalFunctions();
 
-    // Get domain for this communicator
-    ampccl::CommDomain* domain = GetDomainForComm(comm);
+    ampccl::CommDomain* domain = GetDomainByRawComm(comm);
     if (!domain) {
-        // Fallback to original if domain creation fails
         if (orig_hcclAllReduce) {
             return orig_hcclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream);
         }
         return HCCL_INVALID_PARAM;
     }
 
-    // Route through virtual collective
     ampccl::BackendResult result = ampccl::VirtualCollective::AllReduce(
         domain, sendbuff, recvbuff, count,
         static_cast<int>(datatype), static_cast<int>(op), comm, stream);
@@ -116,7 +157,7 @@ hcclResult_t HcclAllGather(
 
     LoadOriginalFunctions();
 
-    ampccl::CommDomain* domain = GetDomainForComm(comm);
+    ampccl::CommDomain* domain = GetDomainByRawComm(comm);
     if (!domain) {
         if (orig_hcclAllGather) {
             return orig_hcclAllGather(sendbuff, recvbuff, sendcount, datatype, comm, stream);

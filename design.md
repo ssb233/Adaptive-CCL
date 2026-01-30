@@ -56,6 +56,7 @@ libampccl/
 │   ├── virtual_collective.h
 │   ├── domain.h
 │   ├── domain_manager.h
+│   ├── comm_init.h
 │   ├── planner.h
 │
 ├── controller/
@@ -88,8 +89,10 @@ libampccl/
 
 Adaptive behavior must be bound to a **communication domain** (topology + communicator).
 
+**Our Comm (CommDomainKey)** is the logical identity of a communicator, built from topology, ranks, and size—not from the raw backend handle. The global "dividing param" table is keyed by this **our Comm**, so it is shared across ranks and reused when a communicator is destroyed and later re-created with the same topology/ranks/size.
+
 ```
-struct CommDomainKey {
+struct CommDomainKey {   // "our Comm" identity
     int world_size;
     std::vector<int> ranks;
     uint64_t topology_hash;
@@ -102,9 +105,11 @@ public:
 };
 ```
 
-All collectives operate within a `CommDomain`.
-
-`DomainManager` maps NCCL/HCCL communicator → CommDomain.
+- **DomainManager** maintains:
+  - **key → CommDomain**: our Comm → domain (controller + param cache). This table is keyed by our Comm and persists across raw comm create/destroy.
+  - **raw_comm → CommDomainKey**: raw NCCL/HCCL comm handle → our Comm. Used only to resolve which domain to use for a collective; unregistering a raw comm does not remove the domain.
+- **CommInit** is intercepted: after backend CommInit, we build our Comm from (nranks, commId, rank), get-or-create domain by that key, register raw_comm → key, and call PCIe init (reserved).
+- **CommDestroy** is intercepted: we only unregister raw_comm → key; the domain (and learned params) remain for reuse.
 
 ------
 

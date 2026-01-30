@@ -6,6 +6,8 @@
 #include <cuda_runtime.h>
 #endif
 
+
+
 namespace ampccl {
 
 class Timer {
