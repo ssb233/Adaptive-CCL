@@ -42,6 +42,18 @@ cmake --build .
 
 ---
 
+## 计时器与编译选项
+
+计时器按**编译目标**二选一，不会同时启用：
+
+- **NCCL 构建**（`NCCL_ONLY=ON` 或默认且找到 CUDA）：使用 **CUDA Runtime Event** 计时（`cudaEventRecord` 挂到 `cudaStream_t`），需链接 CUDA。
+- **HCCL 构建**（`HCCL_ONLY=ON` 或默认且设置 `ASCEND_HOME`）：使用 **ACL Event** 计时（`aclrtRecordEvent` 挂到 `aclrtStream`，参考 pcieccl 的 test_allgather），需 Ascend 头与库。
+- 若两者都不可用：使用 **CPU chrono** 作为回退。
+
+构建时 CMake 会打印使用的计时器（"Timer: CUDA events" / "Timer: ACL events" / "Timer: CPU fallback"）。
+
+---
+
 ## 解耦编译：仅 NCCL 或仅 HCCL
 
 若希望生成**只含 NCCL hook** 或**只含 HCCL hook** 的 .so（体积更小或与 NCCL/HCCL 源码一起编译时使用）：
@@ -69,18 +81,24 @@ cmake --build .
 
 | 变量 | 说明 |
 |------|------|
-| `AMPCCL_LOG_LEVEL` | 日志级别：`0`/`off`、`1`/`error`、`2`/`warn`、`3`/`info`、`4`/`debug`。测试融合 NCCL/HCCL 时建议设为 `info` 或 `debug`。 |
+| **`AMPCCL_ENABLE`** | **总开关**：是否使用 Adaptive-CCL。设为 `1`/`on`/`true`/`yes` 时走自适应双路（fast + PCIe）；**未设或为其他值时，所有调用直接转发到原始 NCCL/HCCL**，行为与未 LD_PRELOAD 一致。 |
+| `AMPCCL_LOG_LEVEL` | 日志级别：`0`/`off`、`1`/`error`、`2`/`warn`、`3`/`info`、`4`/`debug`。 |
 | `AMPCCL_ALGO` | 算法：`tcp`、`dcqcn`、`static`。 |
 | `AMPCCL_MIN_MSG_SIZE` | 启用 PCIe 的最小消息大小（字节）。 |
-| `AMPCCL_ENABLE_PCIE` | `1`/`0` 是否启用 PCIe 路径。 |
+| `AMPCCL_ENABLE_PCIE` | `1`/`0` 是否启用 PCIe 路径（仅在 `AMPCCL_ENABLE=1` 时生效）。 |
 
-示例（打开 INFO 日志）：
+示例（启用 Adaptive-CCL 并打开 INFO 日志）：
 
 ```bash
+export AMPCCL_ENABLE=1
 export AMPCCL_LOG_LEVEL=info
-# 或
-export AMPCCL_LOG_LEVEL=3
+LD_PRELOAD=/path/to/build/libampccl.so ./your_nccl_or_hccl_app
+```
 
+不启用时（走原始 NCCL/HCCL，默认）：
+
+```bash
+# 不设置 AMPCCL_ENABLE，或 export AMPCCL_ENABLE=0
 LD_PRELOAD=/path/to/build/libampccl.so ./your_nccl_or_hccl_app
 ```
 

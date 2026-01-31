@@ -15,6 +15,22 @@ enum class AdaptiveAlgorithm {
 
 class Config {
 public:
+    // Master switch: whether to use Adaptive-CCL at all.
+    // AMPCCL_ENABLE=1|on|true|yes -> use adaptive (split + PCIe); otherwise pass through to original NCCL/HCCL.
+    static bool IsAdaptiveEnabled() {
+        const char* val = std::getenv("AMPCCL_ENABLE");
+        if (val == nullptr) {
+            return false;
+        }
+        if (std::strcmp(val, "1") == 0 || std::strcmp(val, "on") == 0 ||
+            std::strcmp(val, "ON") == 0 || std::strcmp(val, "true") == 0 ||
+            std::strcmp(val, "TRUE") == 0 || std::strcmp(val, "yes") == 0 ||
+            std::strcmp(val, "YES") == 0) {
+            return true;
+        }
+        return false;
+    }
+
     // Algorithm selection via environment variable
     // AMPCCL_ALGO=tcp|dcqcn|static (default: tcp)
     static AdaptiveAlgorithm GetAlgorithm() {

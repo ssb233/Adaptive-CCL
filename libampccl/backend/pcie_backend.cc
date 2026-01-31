@@ -148,15 +148,15 @@ BackendResult BackendBase<PCIeBackend>::AllReduce(
         return BackendResult::Success;  // stub when no PCCL or not 2-rank
     }
     pcclComm_t comm = static_cast<pcclComm_t>(domain->pcie_comm());
+    void* pcie_stream = domain->pcie_stream();
+    if (!pcie_stream) {
+        return BackendResult::UnhandledError;
+    }
     int rank = domain->pcie_rank();
     pccl::IRProgram program = BuildAllReduceIR(rank);
     pcclResult_t ret = pcclSubmit(comm, program,
                                   const_cast<void*>(sendbuff), recvbuff,
-                                  count, static_cast<pcclStream_t>(stream));
-    if (ret != pcclSuccess) {
-        return BackendResult::UnhandledError;
-    }
-    ret = pcclSynchronizeStream(comm, static_cast<pcclStream_t>(stream));
+                                  count, static_cast<pcclStream_t>(pcie_stream));
     return (ret == pcclSuccess) ? BackendResult::Success : BackendResult::UnhandledError;
 #else
     (void)domain;
@@ -182,15 +182,15 @@ BackendResult BackendBase<PCIeBackend>::AllGather(
         return BackendResult::Success;
     }
     pcclComm_t comm = static_cast<pcclComm_t>(domain->pcie_comm());
+    void* pcie_stream = domain->pcie_stream();
+    if (!pcie_stream) {
+        return BackendResult::UnhandledError;
+    }
     int rank = domain->pcie_rank();
     pccl::IRProgram program = BuildAllGatherIR(rank);
     pcclResult_t ret = pcclSubmit(comm, program,
                                   const_cast<void*>(sendbuff), recvbuff,
-                                  sendcount, static_cast<pcclStream_t>(stream));
-    if (ret != pcclSuccess) {
-        return BackendResult::UnhandledError;
-    }
-    ret = pcclSynchronizeStream(comm, static_cast<pcclStream_t>(stream));
+                                  sendcount, static_cast<pcclStream_t>(pcie_stream));
     return (ret == pcclSuccess) ? BackendResult::Success : BackendResult::UnhandledError;
 #else
     (void)domain;

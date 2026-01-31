@@ -46,6 +46,8 @@ libampccl/
 
 ### 1. 环境变量配置
 
+**总开关**：`AMPCCL_ENABLE=1`（或 `on`/`true`/`yes`）时启用自适应双路；**未设或为 0 时，所有调用直接走原始 NCCL/HCCL**，与未 LD_PRELOAD 行为一致。
+
 算法选择通过环境变量 `AMPCCL_ALGO` 控制：
 
 ```bash
@@ -57,7 +59,7 @@ export AMPCCL_ALGO=static   # 使用静态固定比例算法
 其他环境变量：
 - `AMPCCL_MIN_CHUNK_SIZE`: 最小分块大小（默认 4096 字节）
 - `AMPCCL_MIN_MSG_SIZE`: 启用 PCIe 的最小消息大小（默认 8192 字节）
-- `AMPCCL_ENABLE_PCIE`: 启用/禁用 PCIe 后端（默认 1）
+- `AMPCCL_ENABLE_PCIE`: 启用/禁用 PCIe 后端（默认 1，仅当 `AMPCCL_ENABLE=1` 时生效）
 - `AMPCCL_LOG_LEVEL`: 日志级别 `0`/`off`、`1`/`error`、`2`/`warn`、`3`/`info`、`4`/`debug`；测试融合 NCCL/HCCL 时建议设为 `info` 或 `3`
 
 ### 2. PCIe 后端集成
@@ -126,10 +128,12 @@ auto algo = AlgoFactory::Create(domain);  // 读取 AMPCCL_ALGO
 生成的 .so 可用于 LD_PRELOAD：
 
 ```bash
+export AMPCCL_ENABLE=1
 export AMPCCL_LOG_LEVEL=info
 export LD_PRELOAD=/path/to/build/libampccl.so
 ./your_application
 ```
+（不设 `AMPCCL_ENABLE` 时，LD_PRELOAD 后仍走原始 NCCL/HCCL。）
 
 ## 待实现部分
 

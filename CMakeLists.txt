@@ -22,6 +22,8 @@ set(AMPCCL_CORE_SOURCES
     libampccl/backend/fast_backend.cc
     libampccl/backend/pcie_backend.cc
     libampccl/core/comm_init.cc
+    libampccl/core/stream_sync.cc
+    libampccl/core/shm_store.cc
 )
 
 # Hook sources (NCCL_ONLY takes precedence if both set)
@@ -57,10 +59,13 @@ set(AMPCCL_HEADERS
     libampccl/controller/algo_dcqcn.h
     libampccl/controller/algo_factory.h
     libampccl/controller/controller.h
+    libampccl/core/domain_key.h
     libampccl/core/domain.h
     libampccl/core/domain_manager.h
+    libampccl/core/shm_store.h
     libampccl/core/comm_init.h
     libampccl/core/planner.h
+    libampccl/core/stream_sync.h
     libampccl/core/virtual_collective.h
 )
 
@@ -72,12 +77,50 @@ target_link_libraries(${AMPCCL_TARGET_NAME} PRIVATE
     ${CMAKE_DL_LIBS}  # For dlopen/dlsym
 )
 
-# CUDA support (optional, for timer.h)
-find_package(CUDA QUIET)
-if(CUDA_FOUND)
-    target_include_directories(${AMPCCL_TARGET_NAME} PRIVATE ${CUDA_INCLUDE_DIRS})
-    target_link_libraries(${AMPCCL_TARGET_NAME} PRIVATE ${CUDA_LIBRARIES})
-    target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE __CUDACC__)
+# Timer backend: one of CUDA (NCCL) or ACL (HCCL) events, chosen by build target.
+# NCCL_ONLY -> AMPCCL_USE_CUDA_TIMER; HCCL_ONLY -> AMPCCL_USE_ACL_TIMER;
+# both hooks -> CUDA if found else ACL if ASCEND_HOME else CPU fallback.
+if(NCCL_ONLY)
+    find_package(CUDA QUIET)
+    if(CUDA_FOUND)
+        target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE AMPCCL_USE_CUDA_TIMER)
+        target_include_directories(${AMPCCL_TARGET_NAME} PRIVATE ${CUDA_INCLUDE_DIRS})
+        target_link_libraries(${AMPCCL_TARGET_NAME} PRIVATE ${CUDA_LIBRARIES})
+        message(STATUS "  Timer: CUDA events (NCCL)")
+    else()
+        message(STATUS "  Timer: CPU fallback (CUDA not found)")
+    endif()
+elseif(HCCL_ONLY)
+    if(DEFINED ENV{ASCEND_HOME})
+        set(ASCEND_HOME "$ENV{ASCEND_HOME}")
+    endif()
+    if(ASCEND_HOME)
+        target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE AMPCCL_USE_ACL_TIMER)
+        target_include_directories(${AMPCCL_TARGET_NAME} PRIVATE ${ASCEND_HOME}/include)
+        target_link_directories(${AMPCCL_TARGET_NAME} PRIVATE ${ASCEND_HOME}/lib64)
+        target_link_libraries(${AMPCCL_TARGET_NAME} PRIVATE ascendcl runtime)
+        message(STATUS "  Timer: ACL events (HCCL), ASCEND_HOME=${ASCEND_HOME}")
+    else()
+        message(STATUS "  Timer: CPU fallback (ASCEND_HOME not set)")
+    endif()
+else()
+    # Both hooks: prefer CUDA else ACL else CPU
+    find_package(CUDA QUIET)
+    if(CUDA_FOUND)
+        target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE AMPCCL_USE_CUDA_TIMER)
+        target_include_directories(${AMPCCL_TARGET_NAME} PRIVATE ${CUDA_INCLUDE_DIRS})
+        target_link_libraries(${AMPCCL_TARGET_NAME} PRIVATE ${CUDA_LIBRARIES})
+        message(STATUS "  Timer: CUDA events")
+    elseif(DEFINED ENV{ASCEND_HOME})
+        set(ASCEND_HOME "$ENV{ASCEND_HOME}")
+        target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE AMPCCL_USE_ACL_TIMER)
+        target_include_directories(${AMPCCL_TARGET_NAME} PRIVATE ${ASCEND_HOME}/include)
+        target_link_directories(${AMPCCL_TARGET_NAME} PRIVATE ${ASCEND_HOME}/lib64)
+        target_link_libraries(${AMPCCL_TARGET_NAME} PRIVATE ascendcl runtime)
+        message(STATUS "  Timer: ACL events")
+    else()
+        message(STATUS "  Timer: CPU fallback")
+    endif()
 endif()
 
 # PCIe CCL (pcieccl / PCCL) support

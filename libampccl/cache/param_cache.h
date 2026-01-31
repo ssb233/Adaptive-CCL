@@ -4,6 +4,8 @@
 #include "common/op_key.h"
 #include <unordered_map>
 #include <mutex>
+#include <vector>
+#include <utility>
 
 namespace ampccl {
 
@@ -50,6 +52,24 @@ public:
     size_t Size() const {
         std::lock_guard<std::mutex> lock(mutex_);
         return table_.size();
+    }
+
+    // Snapshot for shared-memory sync: copy all entries to vector.
+    void GetAll(std::vector<std::pair<OpKey, ParamValue>>* out) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        out->clear();
+        out->reserve(table_.size());
+        for (const auto& p : table_) {
+            out->emplace_back(p.first, p.second);
+        }
+    }
+
+    // Load from snapshot (e.g., read from shared memory). Merges into table_.
+    void SetFrom(const std::vector<std::pair<OpKey, ParamValue>>& in) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& p : in) {
+            table_[p.first] = p.second;
+        }
     }
 
 private:

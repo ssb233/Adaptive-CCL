@@ -4,11 +4,23 @@
 #include "domain.h"
 #include "controller/algo_factory.h"
 #include "common/log.h"
+#include "common/op_key.h"
+#include "planner.h"
 #include <unordered_map>
 #include <mutex>
 #include <memory>
+#include <optional>
 
 namespace ampccl {
+
+// Pending collective record: registered when a collective is launched, consumed at stream sync.
+struct PendingCollective {
+    CommDomain* domain = nullptr;
+    OpKey op_key;
+    Plan plan;
+    bool fast_success = true;
+    bool pcie_success = true;
+};
 
 // Manages the global "dividing param" table keyed by *our* Comm (CommDomainKey),
 // and the mapping from raw backend communicator to our Comm.
@@ -59,10 +71,36 @@ public:
         raw_to_key_.erase(raw_comm);
     }
 
+    // Stream -> pending collective: register when launching a collective, take at SynchronizeStream.
+    void RegisterStreamPending(void* stream, CommDomain* domain, const OpKey& op_key,
+                               const Plan& plan, bool fast_success, bool pcie_success) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        PendingCollective pending;
+        pending.domain = domain;
+        pending.op_key = op_key;
+        pending.plan = plan;
+        pending.fast_success = fast_success;
+        pending.pcie_success = pcie_success;
+        stream_to_pending_[stream] = std::move(pending);
+    }
+
+    // Take and remove pending for this stream. Returns nullopt if none.
+    std::optional<PendingCollective> TakeStreamPending(void* stream) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = stream_to_pending_.find(stream);
+        if (it == stream_to_pending_.end()) {
+            return std::nullopt;
+        }
+        PendingCollective p = std::move(it->second);
+        stream_to_pending_.erase(it);
+        return p;
+    }
+
     void Clear() {
         std::lock_guard<std::mutex> lock(mutex_);
         raw_to_key_.clear();
         key_to_domain_.clear();
+        stream_to_pending_.clear();
     }
 
 private:
@@ -92,6 +130,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<CommDomainKey, std::unique_ptr<CommDomain>> key_to_domain_;
     std::unordered_map<void*, CommDomainKey> raw_to_key_;
+    std::unordered_map<void*, PendingCollective> stream_to_pending_;
 };
 
 }  // namespace ampccl

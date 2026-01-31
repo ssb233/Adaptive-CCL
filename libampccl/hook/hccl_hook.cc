@@ -4,7 +4,9 @@
 #include "core/virtual_collective.h"
 #include "core/domain_manager.h"
 #include "core/comm_init.h"
+#include "core/stream_sync.h"
 #include "common/op_key.h"
+#include "common/config.h"
 #include <dlfcn.h>
 #include <cstring>
 
@@ -46,6 +48,9 @@ typedef hcclResult_t (*hcclBroadcast_t)(
     const void* sendbuff, void* recvbuff, unsigned long count,
     HcclDataType datatype, unsigned int root, HcclComm comm, aclrtStream stream);
 
+// ACL runtime (for stream sync)
+typedef int (*aclrtSynchronizeStream_t)(aclrtStream stream);
+
 // Function pointers to original HCCL functions
 static hcclGetUniqueId_t orig_hcclGetUniqueId = nullptr;
 static hcclCommInitRank_t orig_hcclCommInitRank = nullptr;
@@ -54,6 +59,7 @@ static hcclAllReduce_t orig_hcclAllReduce = nullptr;
 static hcclAllGather_t orig_hcclAllGather = nullptr;
 static hcclReduceScatter_t orig_hcclReduceScatter = nullptr;
 static hcclBroadcast_t orig_hcclBroadcast = nullptr;
+static aclrtSynchronizeStream_t orig_aclrtSynchronizeStream = nullptr;
 
 // Load original HCCL functions
 static void LoadOriginalFunctions() {
@@ -73,6 +79,17 @@ static void LoadOriginalFunctions() {
         orig_hcclAllGather = (hcclAllGather_t)dlsym(handle, "HcclAllGather");
         orig_hcclReduceScatter = (hcclReduceScatter_t)dlsym(handle, "HcclReduceScatter");
         orig_hcclBroadcast = (hcclBroadcast_t)dlsym(handle, "HcclBroadcast");
+    }
+
+    // ACL runtime for aclrtSynchronizeStream (may be in same lib or libascendcl/libacl)
+    if (!orig_aclrtSynchronizeStream) {
+        void* acl_handle = dlopen("libascendcl.so", RTLD_LAZY);
+        if (!acl_handle) {
+            acl_handle = dlopen("libacl.so", RTLD_LAZY);
+        }
+        if (acl_handle) {
+            orig_aclrtSynchronizeStream = (aclrtSynchronizeStream_t)dlsym(acl_handle, "aclrtSynchronizeStream");
+        }
     }
 
     loaded = true;
@@ -111,6 +128,9 @@ hcclResult_t HcclCommInitRank(HcclComm* comm, unsigned int nranks, hcclUniqueId 
     if (ret != HCCL_SUCCESS || comm == nullptr || *comm == nullptr) {
         return ret;
     }
+    if (!ampccl::Config::IsAdaptiveEnabled()) {
+        return ret;
+    }
     ampccl::CommDomainKey key = ampccl::BuildKeyFromHcclInit(
         static_cast<int>(nranks), &commId, HCCL_UNIQUE_ID_BYTES, static_cast<int>(rank));
     ampccl::DomainManager::GetInstance().RegisterRawComm(*comm, key);
@@ -123,7 +143,9 @@ hcclResult_t HcclCommInitRank(HcclComm* comm, unsigned int nranks, hcclUniqueId 
 
 hcclResult_t HcclCommDestroy(HcclComm comm) {
     LoadOriginalFunctions();
-    ampccl::DomainManager::GetInstance().UnregisterRawComm(comm);
+    if (ampccl::Config::IsAdaptiveEnabled()) {
+        ampccl::DomainManager::GetInstance().UnregisterRawComm(comm);
+    }
     if (orig_hcclCommDestroy) {
         return orig_hcclCommDestroy(comm);
     }
@@ -135,6 +157,9 @@ hcclResult_t HcclAllReduce(
     HcclDataType datatype, HcclReduceOp op, HcclComm comm, aclrtStream stream) {
 
     LoadOriginalFunctions();
+    if (!ampccl::Config::IsAdaptiveEnabled() && orig_hcclAllReduce) {
+        return orig_hcclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream);
+    }
 
     ampccl::CommDomain* domain = GetDomainByRawComm(comm);
     if (!domain) {
@@ -156,6 +181,9 @@ hcclResult_t HcclAllGather(
     HcclDataType datatype, HcclComm comm, aclrtStream stream) {
 
     LoadOriginalFunctions();
+    if (!ampccl::Config::IsAdaptiveEnabled() && orig_hcclAllGather) {
+        return orig_hcclAllGather(sendbuff, recvbuff, sendcount, datatype, comm, stream);
+    }
 
     ampccl::CommDomain* domain = GetDomainByRawComm(comm);
     if (!domain) {
@@ -177,8 +205,6 @@ hcclResult_t HcclReduceScatter(
     HcclDataType datatype, HcclReduceOp op, HcclComm comm, aclrtStream stream) {
 
     LoadOriginalFunctions();
-
-    // Similar implementation...
     if (orig_hcclReduceScatter) {
         return orig_hcclReduceScatter(sendbuff, recvbuff, recvcount, datatype, op, comm, stream);
     }
@@ -190,12 +216,22 @@ hcclResult_t HcclBroadcast(
     HcclDataType datatype, unsigned int root, HcclComm comm, aclrtStream stream) {
 
     LoadOriginalFunctions();
-
-    // Similar implementation...
     if (orig_hcclBroadcast) {
         return orig_hcclBroadcast(sendbuff, recvbuff, count, datatype, root, comm, stream);
     }
     return HCCL_INVALID_PARAM;
+}
+
+int aclrtSynchronizeStream(aclrtStream stream) {
+    LoadOriginalFunctions();
+    if (orig_aclrtSynchronizeStream) {
+        int ret = orig_aclrtSynchronizeStream(stream);
+        if (ret == 0 && ampccl::Config::IsAdaptiveEnabled()) {
+            ampccl::OnStreamSynchronized(stream);
+        }
+        return ret;
+    }
+    return -1;
 }
 
 }  // extern "C"

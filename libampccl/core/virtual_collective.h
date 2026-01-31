@@ -7,7 +7,6 @@
 #include "common/op_key.h"
 #include "backend/fast_backend.h"
 #include "backend/pcie_backend.h"
-#include "telemetry/timer.h"
 #include "telemetry/stats.h"
 #include "common/config.h"
 #include "common/log.h"
@@ -36,6 +35,20 @@ public:
         op_key.bytes = count * GetDataTypeSize(datatype);
         op_key.datatype = datatype;
 
+        domain->EnsureShmAttached();
+        ShmParamStore* shm = domain->shm_store();
+        if (shm->IsAttached() && shm->IsRank0()) {
+            ExecStat global_stat;
+            OpKey agg_op_key;
+            if (shm->ReadAllStatsAndAggregate(&global_stat, &agg_op_key) && domain->controller) {
+                domain->controller->Update(agg_op_key, global_stat, domain->param_cache);
+                shm->WriteParams(domain->param_cache);
+            }
+        }
+        if (shm->IsAttached()) {
+            shm->ReadParams(&domain->param_cache);
+        }
+
         // 2. ParamCache lookup
         ParamValue param = domain->param_cache.Lookup(op_key);
 
@@ -45,79 +58,51 @@ public:
         // 4. Planner builds split plan
         Plan plan = Planner::CreatePlan(op_key.bytes, alpha, param.use_pcie);
 
-        // 5. Launch fast + PCIe backend
-        ExecStat stat;
-        Timer timer;
-
+        // 5. Launch fast + PCIe backend: record events only, no sync; pending consumed at SynchronizeStream.
         AMPCCL_LOG(INFO, "AllReduce before CCL: op=AllReduce bytes=%zu datatype=%d alpha=%.3f use_pcie=%d fast_bytes=%zu pcie_bytes=%zu",
                    op_key.bytes, datatype, alpha, plan.use_pcie ? 1 : 0, plan.fast_bytes, plan.pcie_bytes);
 
-        if (plan.use_pcie && plan.pcie_bytes > 0) {
-            // Split buffer and launch both backends
+        bool fast_ok = true;
+        bool pcie_ok = true;
+        void* pcie_stream = domain->pcie_stream();
+
+        if (plan.use_pcie && plan.pcie_bytes > 0 && pcie_stream) {
             size_t fast_offset = 0;
             size_t pcie_offset = plan.fast_bytes;
             size_t elem_size = GetDataTypeSize(datatype);
 
-            // Fast backend
             if (plan.fast_bytes > 0) {
-                timer.Start();
+                domain->timer_fast().Start(stream);
                 void* fast_send = const_cast<void*>(sendbuff);
                 void* fast_recv = recvbuff;
-
                 BackendResult fast_result = FastBackendImpl::AllReduce(
                     fast_send, fast_recv, plan.fast_bytes / elem_size,
                     datatype, op, comm, stream);
-
-                timer.Stop();
-                stat.fast_time = timer.ElapsedSeconds();
-                stat.fast_bytes = plan.fast_bytes;
-                stat.fast_success = (fast_result == BackendResult::Success);
+                domain->timer_fast().Stop(stream);
+                fast_ok = (fast_result == BackendResult::Success);
             }
-
-            // PCIe backend (offset buffer) — uses domain's pcie_comm
             if (plan.pcie_bytes > 0) {
-                timer.Start();
+                domain->timer_pcie().Start(pcie_stream);
                 const char* pcie_send = static_cast<const char*>(sendbuff) + pcie_offset;
                 char* pcie_recv = static_cast<char*>(recvbuff) + pcie_offset;
-
                 BackendResult pcie_result = PCIeBackendImpl::AllReduce(
                     domain, pcie_send, pcie_recv, plan.pcie_bytes / elem_size,
-                    datatype, op, stream);
-
-                timer.Stop();
-                stat.pcie_time = timer.ElapsedSeconds();
-                stat.pcie_bytes = plan.pcie_bytes;
-                stat.pcie_success = (pcie_result == BackendResult::Success);
+                    datatype, op, pcie_stream);
+                domain->timer_pcie().Stop(pcie_stream);
+                pcie_ok = (pcie_result == BackendResult::Success);
             }
         } else {
-            // Fast-only path
-            timer.Start();
+            domain->timer_fast().Start(stream);
             BackendResult result = FastBackendImpl::AllReduce(
                 sendbuff, recvbuff, count, datatype, op, comm, stream);
-            timer.Stop();
-            stat.fast_time = timer.ElapsedSeconds();
-            stat.fast_bytes = op_key.bytes;
-            stat.fast_success = (result == BackendResult::Success);
-            stat.pcie_time = 0.0;
-            stat.pcie_bytes = 0;
-            stat.pcie_success = true;
+            domain->timer_fast().Stop(stream);
+            fast_ok = (result == BackendResult::Success);
         }
 
-        // 6. Wait (handled by backend synchronization)
+        DomainManager::GetInstance().RegisterStreamPending(
+            stream, domain, op_key, plan, fast_ok, pcie_ok);
 
-        // 7. Measure times (already done above)
-
-        // 8. Controller.update()
-        // 9. Cache.update()
-        domain->controller->Update(op_key, stat, domain->param_cache);
-
-        AMPCCL_LOG(INFO, "AllReduce after CCL: fast_time=%.6fs pcie_time=%.6fs fast_bytes=%zu pcie_bytes=%zu fast_ok=%d pcie_ok=%d (plan: alpha=%.3f fast_bytes=%zu pcie_bytes=%zu)",
-                   stat.fast_time, stat.pcie_time, stat.fast_bytes, stat.pcie_bytes,
-                   stat.fast_success ? 1 : 0, stat.pcie_success ? 1 : 0,
-                   alpha, plan.fast_bytes, plan.pcie_bytes);
-
-        return stat.fast_success && stat.pcie_success ?
-               BackendResult::Success : BackendResult::UnhandledError;
+        return (fast_ok && pcie_ok) ? BackendResult::Success : BackendResult::UnhandledError;
     }
 
     // Similar implementations for other collectives...
@@ -136,6 +121,20 @@ public:
         op_key.bytes = sendcount * GetDataTypeSize(datatype);
         op_key.datatype = datatype;
 
+        domain->EnsureShmAttached();
+        ShmParamStore* shm = domain->shm_store();
+        if (shm->IsAttached() && shm->IsRank0()) {
+            ExecStat global_stat;
+            OpKey agg_op_key;
+            if (shm->ReadAllStatsAndAggregate(&global_stat, &agg_op_key) && domain->controller) {
+                domain->controller->Update(agg_op_key, global_stat, domain->param_cache);
+                shm->WriteParams(domain->param_cache);
+            }
+        }
+        if (shm->IsAttached()) {
+            shm->ReadParams(&domain->param_cache);
+        }
+
         ParamValue param = domain->param_cache.Lookup(op_key);
         double alpha = domain->controller->SuggestAlpha(op_key, domain->param_cache);
         Plan plan = Planner::CreatePlan(op_key.bytes, alpha, param.use_pcie);
@@ -143,53 +142,44 @@ public:
         AMPCCL_LOG(INFO, "AllGather before CCL: bytes=%zu datatype=%d alpha=%.3f use_pcie=%d fast_bytes=%zu pcie_bytes=%zu",
                    op_key.bytes, datatype, alpha, plan.use_pcie ? 1 : 0, plan.fast_bytes, plan.pcie_bytes);
 
-        ExecStat stat;
-        Timer timer;
+        bool fast_ok = true;
+        bool pcie_ok = true;
+        void* pcie_stream = domain->pcie_stream();
 
-        if (plan.use_pcie && plan.pcie_bytes > 0) {
+        if (plan.use_pcie && plan.pcie_bytes > 0 && pcie_stream) {
             size_t fast_offset = 0;
             size_t pcie_offset = plan.fast_bytes;
             size_t elem_size = GetDataTypeSize(datatype);
 
             if (plan.fast_bytes > 0) {
-                timer.Start();
+                domain->timer_fast().Start(stream);
                 BackendResult fast_result = FastBackendImpl::AllGather(
                     sendbuff, recvbuff, plan.fast_bytes / elem_size, datatype, comm, stream);
-                timer.Stop();
-                stat.fast_time = timer.ElapsedSeconds();
-                stat.fast_bytes = plan.fast_bytes;
-                stat.fast_success = (fast_result == BackendResult::Success);
+                domain->timer_fast().Stop(stream);
+                fast_ok = (fast_result == BackendResult::Success);
             }
             if (plan.pcie_bytes > 0) {
-                timer.Start();
+                domain->timer_pcie().Start(pcie_stream);
                 const char* pcie_send = static_cast<const char*>(sendbuff) + pcie_offset;
                 char* pcie_recv = static_cast<char*>(recvbuff) + pcie_offset;
-                // PCCL 2-rank AllGather: recvbuff holds 2 chunks; per-chunk elements = pcie_bytes/(2*elem_size)
                 size_t pcie_chunk_elems = plan.pcie_bytes / (2 * elem_size);
                 BackendResult pcie_result = PCIeBackendImpl::AllGather(
-                    domain, pcie_send, pcie_recv, pcie_chunk_elems, datatype, stream);
-                timer.Stop();
-                stat.pcie_time = timer.ElapsedSeconds();
-                stat.pcie_bytes = plan.pcie_bytes;
-                stat.pcie_success = (pcie_result == BackendResult::Success);
+                    domain, pcie_send, pcie_recv, pcie_chunk_elems, datatype, pcie_stream);
+                domain->timer_pcie().Stop(pcie_stream);
+                pcie_ok = (pcie_result == BackendResult::Success);
             }
         } else {
-            timer.Start();
+            domain->timer_fast().Start(stream);
             BackendResult result = FastBackendImpl::AllGather(
                 sendbuff, recvbuff, sendcount, datatype, comm, stream);
-            timer.Stop();
-            stat.fast_time = timer.ElapsedSeconds();
-            stat.fast_bytes = op_key.bytes;
-            stat.fast_success = (result == BackendResult::Success);
+            domain->timer_fast().Stop(stream);
+            fast_ok = (result == BackendResult::Success);
         }
 
-        domain->controller->Update(op_key, stat, domain->param_cache);
+        DomainManager::GetInstance().RegisterStreamPending(
+            stream, domain, op_key, plan, fast_ok, pcie_ok);
 
-        AMPCCL_LOG(INFO, "AllGather after CCL: fast_time=%.6fs pcie_time=%.6fs fast_bytes=%zu fast_ok=%d (plan: alpha=%.3f fast_bytes=%zu pcie_bytes=%zu)",
-                   stat.fast_time, stat.pcie_time, stat.fast_bytes, stat.fast_success ? 1 : 0,
-                   alpha, plan.fast_bytes, plan.pcie_bytes);
-
-        return stat.fast_success ? BackendResult::Success : BackendResult::UnhandledError;
+        return fast_ok ? BackendResult::Success : BackendResult::UnhandledError;
     }
 
 private:

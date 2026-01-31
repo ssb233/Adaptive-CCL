@@ -19,6 +19,10 @@ void InitPCIeForDomain(CommDomain* domain, int rank, int nranks) {
     domain->set_pcie_comm(pcie_comm);
     domain->set_pcie_rank(rank);
     domain->set_pcie_nranks(nranks);
+    pcclStream_t pcie_stream = nullptr;
+    if (pcclCreateStream(pcie_comm, &pcie_stream) == pcclSuccess && pcie_stream) {
+        domain->set_pcie_stream(pcie_stream);
+    }
 #else
     (void)rank;
     (void)nranks;

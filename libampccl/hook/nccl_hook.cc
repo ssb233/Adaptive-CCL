@@ -4,7 +4,9 @@
 #include "core/virtual_collective.h"
 #include "core/domain_manager.h"
 #include "core/comm_init.h"
+#include "core/stream_sync.h"
 #include "common/op_key.h"
+#include "common/config.h"
 #include <dlfcn.h>
 #include <cstring>
 
@@ -41,6 +43,9 @@ typedef int (*ncclBroadcast_t)(
     const void* sendbuff, void* recvbuff, size_t count,
     ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream);
 
+// CUDA runtime (for stream sync)
+typedef int (*cudaStreamSynchronize_t)(cudaStream_t stream);  // cudaError_t
+
 // Function pointers to original NCCL functions
 static ncclGetUniqueId_t orig_ncclGetUniqueId = nullptr;
 static ncclCommInitRank_t orig_ncclCommInitRank = nullptr;
@@ -49,6 +54,7 @@ static ncclAllReduce_t orig_ncclAllReduce = nullptr;
 static ncclAllGather_t orig_ncclAllGather = nullptr;
 static ncclReduceScatter_t orig_ncclReduceScatter = nullptr;
 static ncclBroadcast_t orig_ncclBroadcast = nullptr;
+static cudaStreamSynchronize_t orig_cudaStreamSynchronize = nullptr;
 
 // Load original NCCL functions
 static void LoadOriginalFunctions() {
@@ -68,6 +74,14 @@ static void LoadOriginalFunctions() {
         orig_ncclAllGather = (ncclAllGather_t)dlsym(handle, "ncclAllGather");
         orig_ncclReduceScatter = (ncclReduceScatter_t)dlsym(handle, "ncclReduceScatter");
         orig_ncclBroadcast = (ncclBroadcast_t)dlsym(handle, "ncclBroadcast");
+    }
+
+    // CUDA runtime for cudaStreamSynchronize
+    if (!orig_cudaStreamSynchronize) {
+        void* cuda_handle = dlopen("libcudart.so", RTLD_LAZY);
+        if (cuda_handle) {
+            orig_cudaStreamSynchronize = (cudaStreamSynchronize_t)dlsym(cuda_handle, "cudaStreamSynchronize");
+        }
     }
 
     loaded = true;
@@ -106,6 +120,9 @@ int ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int myra
     if (ret != 0 || comm == nullptr || *comm == nullptr) {
         return ret;
     }
+    if (!ampccl::Config::IsAdaptiveEnabled()) {
+        return ret;
+    }
     ampccl::CommDomainKey key = ampccl::BuildKeyFromNcclInit(
         nranks, &commId, NCCL_UNIQUE_ID_BYTES, myrank);
     ampccl::DomainManager::GetInstance().RegisterRawComm(*comm, key);
@@ -118,7 +135,9 @@ int ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int myra
 
 int ncclCommDestroy(ncclComm_t comm) {
     LoadOriginalFunctions();
-    ampccl::DomainManager::GetInstance().UnregisterRawComm(comm);
+    if (ampccl::Config::IsAdaptiveEnabled()) {
+        ampccl::DomainManager::GetInstance().UnregisterRawComm(comm);
+    }
     if (orig_ncclCommDestroy) {
         return orig_ncclCommDestroy(comm);
     }
@@ -130,6 +149,9 @@ int ncclAllReduce(
     ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream) {
 
     LoadOriginalFunctions();
+    if (!ampccl::Config::IsAdaptiveEnabled() && orig_ncclAllReduce) {
+        return orig_ncclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream);
+    }
 
     ampccl::CommDomain* domain = GetDomainByRawComm(comm);
     if (!domain) {
@@ -151,6 +173,9 @@ int ncclAllGather(
     ncclDataType_t datatype, ncclComm_t comm, cudaStream_t stream) {
 
     LoadOriginalFunctions();
+    if (!ampccl::Config::IsAdaptiveEnabled() && orig_ncclAllGather) {
+        return orig_ncclAllGather(sendbuff, recvbuff, sendcount, datatype, comm, stream);
+    }
 
     ampccl::CommDomain* domain = GetDomainByRawComm(comm);
     if (!domain) {
@@ -172,8 +197,6 @@ int ncclReduceScatter(
     ncclDataType_t datatype, ncclRedOp_t op, ncclComm_t comm, cudaStream_t stream) {
 
     LoadOriginalFunctions();
-
-    // Similar implementation...
     if (orig_ncclReduceScatter) {
         return orig_ncclReduceScatter(sendbuff, recvbuff, recvcount, datatype, op, comm, stream);
     }
@@ -185,12 +208,22 @@ int ncclBroadcast(
     ncclDataType_t datatype, int root, ncclComm_t comm, cudaStream_t stream) {
 
     LoadOriginalFunctions();
-
-    // Similar implementation...
     if (orig_ncclBroadcast) {
         return orig_ncclBroadcast(sendbuff, recvbuff, count, datatype, root, comm, stream);
     }
     return -1;
+}
+
+int cudaStreamSynchronize(cudaStream_t stream) {
+    LoadOriginalFunctions();
+    if (orig_cudaStreamSynchronize) {
+        int ret = orig_cudaStreamSynchronize(stream);
+        if (ret == 0 && ampccl::Config::IsAdaptiveEnabled()) {
+            ampccl::OnStreamSynchronized(stream);
+        }
+        return ret;
+    }
+    return -1;  // cudaErrorUnknown or similar
 }
 
 }  // extern "C"
