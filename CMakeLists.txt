@@ -21,6 +21,7 @@ include_directories(${AMPCCL_INCLUDE_DIR})
 set(AMPCCL_CORE_SOURCES
     libampccl/backend/fast_backend.cc
     libampccl/backend/pcie_backend.cc
+    libampccl/core/comm_init.cc
 )
 
 # Hook sources (NCCL_ONLY takes precedence if both set)
@@ -79,9 +80,34 @@ if(CUDA_FOUND)
     target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE __CUDACC__)
 endif()
 
-# PCIe CCL support (to be linked when available)
+# PCIe CCL (pcieccl / PCCL) support
+# Set PCIECCL_ROOT to pcieccl project root. Build pcieccl first: make lib DEVICE=ascend
 if(ENABLE_PCIE)
-    target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE AMPCCL_ENABLE_PCIE)
+    if(DEFINED ENV{PCIECCL_ROOT})
+        set(PCIECCL_ROOT "$ENV{PCIECCL_ROOT}")
+    endif()
+    if(PCIECCL_ROOT)
+        set(PCIECCL_INCLUDE_DIR "${PCIECCL_ROOT}/include")
+        set(PCIECCL_LIB_DIR "${PCIECCL_ROOT}/build/lib")
+        if(EXISTS "${PCIECCL_INCLUDE_DIR}/comm.hpp")
+            target_include_directories(${AMPCCL_TARGET_NAME} PRIVATE ${PCIECCL_INCLUDE_DIR})
+            target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE LOG_LEVEL=1)
+            target_link_directories(${AMPCCL_TARGET_NAME} PRIVATE ${PCIECCL_LIB_DIR})
+            target_link_libraries(${AMPCCL_TARGET_NAME} PRIVATE pccl numa rt pthread)
+            # Ascend (for PCCL built with DEVICE=ascend)
+            if(DEFINED ENV{ASCEND_HOME})
+                set(ASCEND_HOME "$ENV{ASCEND_HOME}")
+                target_link_directories(${AMPCCL_TARGET_NAME} PRIVATE ${ASCEND_HOME}/lib64)
+                target_link_libraries(${AMPCCL_TARGET_NAME} PRIVATE ascendcl runtime)
+            endif()
+            target_compile_definitions(${AMPCCL_TARGET_NAME} PRIVATE AMPCCL_ENABLE_PCIE)
+            message(STATUS "  PCIeCCL: ${PCIECCL_ROOT} (PCCL linked)")
+        else()
+            message(WARNING "PCIECCL_ROOT set but comm.hpp not found; PCIe backend will stub.")
+        endif()
+    else()
+        message(STATUS "  PCIeCCL: not set (set PCIECCL_ROOT to link PCCL)")
+    endif()
 endif()
 
 # Installation

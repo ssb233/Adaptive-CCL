@@ -74,15 +74,15 @@ public:
                 stat.fast_success = (fast_result == BackendResult::Success);
             }
 
-            // PCIe backend (offset buffer)
+            // PCIe backend (offset buffer) — uses domain's pcie_comm
             if (plan.pcie_bytes > 0) {
                 timer.Start();
                 const char* pcie_send = static_cast<const char*>(sendbuff) + pcie_offset;
                 char* pcie_recv = static_cast<char*>(recvbuff) + pcie_offset;
 
                 BackendResult pcie_result = PCIeBackendImpl::AllReduce(
-                    pcie_send, pcie_recv, plan.pcie_bytes / elem_size,
-                    datatype, op, comm, stream);
+                    domain, pcie_send, pcie_recv, plan.pcie_bytes / elem_size,
+                    datatype, op, stream);
 
                 timer.Stop();
                 stat.pcie_time = timer.ElapsedSeconds();
@@ -147,8 +147,32 @@ public:
         Timer timer;
 
         if (plan.use_pcie && plan.pcie_bytes > 0) {
-            // Implementation similar to AllReduce
-            // ... (omitted for brevity)
+            size_t fast_offset = 0;
+            size_t pcie_offset = plan.fast_bytes;
+            size_t elem_size = GetDataTypeSize(datatype);
+
+            if (plan.fast_bytes > 0) {
+                timer.Start();
+                BackendResult fast_result = FastBackendImpl::AllGather(
+                    sendbuff, recvbuff, plan.fast_bytes / elem_size, datatype, comm, stream);
+                timer.Stop();
+                stat.fast_time = timer.ElapsedSeconds();
+                stat.fast_bytes = plan.fast_bytes;
+                stat.fast_success = (fast_result == BackendResult::Success);
+            }
+            if (plan.pcie_bytes > 0) {
+                timer.Start();
+                const char* pcie_send = static_cast<const char*>(sendbuff) + pcie_offset;
+                char* pcie_recv = static_cast<char*>(recvbuff) + pcie_offset;
+                // PCCL 2-rank AllGather: recvbuff holds 2 chunks; per-chunk elements = pcie_bytes/(2*elem_size)
+                size_t pcie_chunk_elems = plan.pcie_bytes / (2 * elem_size);
+                BackendResult pcie_result = PCIeBackendImpl::AllGather(
+                    domain, pcie_send, pcie_recv, pcie_chunk_elems, datatype, stream);
+                timer.Stop();
+                stat.pcie_time = timer.ElapsedSeconds();
+                stat.pcie_bytes = plan.pcie_bytes;
+                stat.pcie_success = (pcie_result == BackendResult::Success);
+            }
         } else {
             timer.Start();
             BackendResult result = FastBackendImpl::AllGather(

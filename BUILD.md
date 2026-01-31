@@ -91,6 +91,41 @@ LD_PRELOAD=/path/to/build/libampccl.so ./your_nccl_or_hccl_app
 
 ---
 
+## 启用 PCIe 后端（pcieccl / PCCL）
+
+若已克隆 [pcieccl](https://github.com/...) 到与 Adaptive-CCL 同级目录（或任意路径）：
+
+1. **先编译 pcieccl（Ascend/HCCL 环境）**
+
+   ```bash
+   cd /path/to/pcieccl
+   make lib DEVICE=ascend ASCEND_HOME=/usr/local/Ascend/ascend-toolkit/latest
+   ```
+
+   产物：`pcieccl/build/lib/libpccl.so`。
+
+2. **再编译 Adaptive-CCL 并链接 PCCL**
+
+   ```bash
+   cd /path/to/Adaptive-CCL
+   export PCIECCL_ROOT=/path/to/pcieccl
+   export ASCEND_HOME=/usr/local/Ascend/ascend-toolkit/latest  # 与 pcieccl 一致
+   ./scripts/build.sh
+   ```
+
+   或使用一键脚本（默认认为 pcieccl 在 `../pcieccl`）：
+
+   ```bash
+   ./scripts/build_with_pcie.sh /path/to/pcieccl
+   ```
+
+   CMake 会加入 `-I${PCIECCL_ROOT}/include`、链接 `libpccl.so` 与 Ascend 库，并在 `comm_init.cc` / `pcie_backend.cc` 中启用 PCCL 的 `pcclInit`、`pcclSubmit` 等调用。
+
+3. **不设置 PCIECCL_ROOT 时**  
+   PCIe 后端仍参与编译，但不链接 pcieccl，集体通信走 fast 路径，PCIe 调用为桩实现。
+
+---
+
 ## 与 NCCL/HCCL 源码一起编译
 
 本仓库设计为**独立编译成 .so 再通过 LD_PRELOAD 注入**，不要求与 NCCL/HCCL 同树编译。

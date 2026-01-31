@@ -116,7 +116,7 @@ hcclResult_t HcclCommInitRank(HcclComm* comm, unsigned int nranks, hcclUniqueId 
     ampccl::DomainManager::GetInstance().RegisterRawComm(*comm, key);
     ampccl::CommDomain* domain = ampccl::DomainManager::GetInstance().GetDomainByRawComm(*comm);
     if (domain) {
-        ampccl::InitPCIeForDomain(domain);  // reserved
+        ampccl::InitPCIeForDomain(domain, static_cast<int>(rank), static_cast<int>(nranks));
     }
     return ret;
 }

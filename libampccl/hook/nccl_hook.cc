@@ -111,7 +111,7 @@ int ncclCommInitRank(ncclComm_t* comm, int nranks, ncclUniqueId commId, int myra
     ampccl::DomainManager::GetInstance().RegisterRawComm(*comm, key);
     ampccl::CommDomain* domain = ampccl::DomainManager::GetInstance().GetDomainByRawComm(*comm);
     if (domain) {
-        ampccl::InitPCIeForDomain(domain);  // reserved
+        ampccl::InitPCIeForDomain(domain, myrank, nranks);
     }
     return ret;
 }

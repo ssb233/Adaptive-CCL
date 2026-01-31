@@ -5,55 +5,55 @@
 
 namespace ampccl {
 
+class CommDomain;
+
 // PCIe backend tag
 struct PCIeBackend {};
 
-// Specialization for PCIe backend
-// This will call vendor-provided PCIe CCL APIs (to be included later)
+// PCIe backend uses CommDomain (pcie_comm, pcie_rank, pcie_nranks); raw comm not used.
 template<>
 class BackendBase<PCIeBackend> {
 public:
     static BackendResult AllReduce(
+        CommDomain* domain,
         const void* sendbuff,
         void* recvbuff,
         size_t count,
         int datatype,
         int op,
-        void* comm,
         void* stream
     );
 
     static BackendResult AllGather(
+        CommDomain* domain,
         const void* sendbuff,
         void* recvbuff,
         size_t sendcount,
         int datatype,
-        void* comm,
         void* stream
     );
 
     static BackendResult ReduceScatter(
+        CommDomain* domain,
         const void* sendbuff,
         void* recvbuff,
         size_t recvcount,
         int datatype,
         int op,
-        void* comm,
         void* stream
     );
 
     static BackendResult Broadcast(
+        CommDomain* domain,
         const void* sendbuff,
         void* recvbuff,
         size_t count,
         int datatype,
         int root,
-        void* comm,
         void* stream
     );
 };
 
-// Type alias for convenience
 using PCIeBackendImpl = BackendBase<PCIeBackend>;
 
 }  // namespace ampccl

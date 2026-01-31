@@ -39,12 +39,9 @@ inline CommDomainKey BuildKeyFromHcclInit(int nranks,
     return BuildKeyFromNcclInit(nranks, comm_id_bytes, comm_id_len, rank);
 }
 
-// PCIe communicator / resource init for this domain. Reserved for later.
-// Called after fast backend (NCCL/HCCL) comm is created.
-inline void InitPCIeForDomain(CommDomain* domain) {
-    (void)domain;
-    // TODO: Initialize PCIe CCL context for this domain when API is available.
-}
+// PCIe (PCCL) communicator init for this domain. Called from CommInit hook
+// after raw comm is created and domain is registered. Implemented in comm_init.cc.
+void InitPCIeForDomain(CommDomain* domain, int rank, int nranks);
 
 }  // namespace ampccl
 

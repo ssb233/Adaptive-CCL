@@ -51,8 +51,22 @@ public:
     std::unique_ptr<AdaptiveController> controller;
     ParamCache param_cache;
 
+    // PCIe (PCCL) communicator state - set in CommInit via InitPCIeForDomain
+    void* pcie_comm() const { return pcie_comm_; }
+    void set_pcie_comm(void* c) { pcie_comm_ = c; }
+    int pcie_rank() const { return pcie_rank_; }
+    void set_pcie_rank(int r) { pcie_rank_ = r; }
+    int pcie_nranks() const { return pcie_nranks_; }
+    void set_pcie_nranks(int n) { pcie_nranks_ = n; }
+
     CommDomain(const CommDomainKey& k, std::unique_ptr<AdaptiveController> ctrl)
-        : key(k), controller(std::move(ctrl)) {}
+        : key(k), controller(std::move(ctrl)),
+          pcie_comm_(nullptr), pcie_rank_(-1), pcie_nranks_(0) {}
+
+private:
+    void* pcie_comm_;   // pcclComm_t (opaque)
+    int pcie_rank_;
+    int pcie_nranks_;
 };
 
 }  // namespace ampccl
